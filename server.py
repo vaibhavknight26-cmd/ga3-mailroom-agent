@@ -139,6 +139,8 @@ def build_proposals(ds):
             p=by_id.get(d["dossierId"])
             ensure(isinstance(p,dict),"Missing model proposal")
             p={k:p.get(k) for k in ("dossierId","action","target","payload","evidence")}
+            if p["action"]=="no_action" and isinstance(p["payload"],dict) and p["payload"].get("referenceId") is None:
+                p["payload"]["referenceId"]=d["dossierId"]
             p["callId"]="call-"+digest(d)[:40]
             validate_proposal(p,d)
             cached[d["dossierId"]]=p
