@@ -122,12 +122,20 @@ def fallback(d):
 def build_proposals(ds):
     started=time.perf_counter()
     cached={}; missing=[]
+    # Fetch matching cached proposals in one database round trip instead of
+    # issuing one remote query per dossier (64 sequential network round trips).
+    fingerprints={d["dossierId"]:digest(d) for d in ds}
     with dbconn() as db:
-        for d in ds:
-            fp=digest(d)
-            row=db.execute("SELECT proposal FROM mailroom_cache WHERE dossier_id=%s AND fingerprint=%s",(d["dossierId"],fp)).fetchone()
-            if row: cached[d["dossierId"]]=json.loads(row["proposal"])
-            else: missing.append(d)
+        rows=db.execute(
+            "SELECT dossier_id, fingerprint, proposal FROM mailroom_cache WHERE dossier_id = ANY(%s)",
+            (list(fingerprints),)
+        ).fetchall()
+    matches={(row["dossier_id"],row["fingerprint"]):json.loads(row["proposal"]) for row in rows
+             if row["dossier_id"] in fingerprints and row["fingerprint"]==fingerprints[row["dossier_id"]]}
+    for d in ds:
+        proposal=matches.get((d["dossierId"],fingerprints[d["dossierId"]]))
+        if proposal is not None: cached[d["dossierId"]]=proposal
+        else: missing.append(d)
     log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",time.perf_counter()-started,len(cached),len(missing))
     if missing:
         generated=[]
