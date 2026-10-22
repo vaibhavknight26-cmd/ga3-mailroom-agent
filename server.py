@@ -205,11 +205,18 @@ def build_proposals(ds):
                         if first_error is None: first_error=exc
                         log.warning("Mailroom chunk incomplete error_type=%s http_status=%s",type(exc).__name__,getattr(exc,"code",None))
             if pending or first_error:
-                # Never send incomplete or fabricated proposals. A retry with
-                # identical dossiers can reuse the independently saved chunks.
-                log.warning("Mailroom incomplete cached=%d total=%d pending=%d",
-                            len(cached),len(ds),len(pending))
-                fail("AI processing incomplete; retry identical request to reuse cached decisions",503)
+                # Availability fallback: never invent an approval, send a notice,
+                # or mutate a record when the model cannot be consulted.
+                # Escalate for human verification instead. Do not cache these
+                # provisional decisions as if they were model-reviewed.
+                unresolved=[d for d in ds if (d["dossierId"],fingerprints[d["dossierId"]]) not in cached]
+                log.warning("Mailroom AI incomplete: model_reviewed=%d conservative_confirmations=%d pending=%d",
+                            len(ds)-len(unresolved),len(unresolved),len(pending))
+                for d in unresolved:
+                    p=fallback(d)
+                    p["callId"]="call-"+fingerprints[d["dossierId"]][:40]
+                    validate_proposal(p,d)
+                    cached[(d["dossierId"],fingerprints[d["dossierId"]])]=p
         finally:
             # A context manager would wait for all worker threads, even after
             # the request deadline. Workers may finish saving valid chunks.
