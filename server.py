@@ -130,9 +130,12 @@ def build_proposals(ds):
     if missing:
         generated=[]
         # Chunk to bound response sizes and stay within provider output limits.
-        for i in range(0,len(missing),12):
-            chunk=missing[i:i+12]
-            generated.extend(gemini_generate(chunk))
+        chunks=[missing[i:i+12] for i in range(0,len(missing),12)]
+        # Run independent Gemini batches concurrently to meet the 55-second deadline.
+        # executor.map preserves batch order and propagates errors without partial writes.
+        with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
+            for batch in executor.map(gemini_generate,chunks):
+                generated.extend(batch)
         by_id={p.get("dossierId"):p for p in generated if isinstance(p,dict)}
         ensure(len(by_id)==len(missing),"Model proposal count mismatch")
         for d in missing:
