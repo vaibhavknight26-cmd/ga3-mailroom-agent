@@ -90,7 +90,7 @@ def validate_dossiers(ds):
             for line in src["lines"]:
                 ensure(isinstance(line,dict) and isinstance(line.get("lineId"),str) and isinstance(line.get("text"),str) and line["lineId"] not in lines,"Invalid line")
                 lines.add(line["lineId"])
-def gemini_generate(dossiers, timeout_seconds=29):
+def gemini_generate(dossiers, timeout_seconds=23):
     key=os.environ.get("GEMINI_API_KEY")
     if not key: raise RuntimeError("GEMINI_API_KEY missing")
     model=os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite")
@@ -140,7 +140,7 @@ def build_proposals(ds):
     log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",time.perf_counter()-started,len(cached),len(missing))
     if missing:
         generated=[]
-        chunks=[missing[i:i+12] for i in range(0,len(missing),12)]
+        chunks=[missing[i:i+8] for i in range(0,len(missing),8)]
         def timed_generate(item):
             index,chunk=item
             t=time.perf_counter()
@@ -152,7 +152,7 @@ def build_proposals(ds):
                 log.exception("Mailroom timing gemini_batch=%d failed_after=%.2fs",index,time.perf_counter()-t)
                 raise
         t=time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
+        with ThreadPoolExecutor(max_workers=min(8,len(chunks))) as executor:
             futures=[executor.submit(timed_generate,item) for item in enumerate(chunks)]
             for index,future in enumerate(futures):
                 try:
@@ -163,9 +163,9 @@ def build_proposals(ds):
                     log.warning("Mailroom transient model failure batch=%d type=%s; retrying smaller chunks",
                                 index,type(exc).__name__)
                     chunk=chunks[index]
-                    subchunks=[chunk[i:i+4] for i in range(0,len(chunk),4)]
+                    subchunks=[chunk[i:i+2] for i in range(0,len(chunk),2)]
                     with ThreadPoolExecutor(max_workers=len(subchunks)) as retry_pool:
-                        retry_futures=[retry_pool.submit(gemini_generate,sub,17) for sub in subchunks]
+                        retry_futures=[retry_pool.submit(gemini_generate,sub,15) for sub in subchunks]
                         for retry_future in retry_futures:
                             generated.extend(retry_future.result())
         log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
