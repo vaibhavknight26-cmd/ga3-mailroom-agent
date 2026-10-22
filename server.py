@@ -2,7 +2,7 @@ import os, json, hashlib, base64, re, logging, secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import JSONResponse
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
@@ -151,7 +151,7 @@ def verify_signature(key_jwk, evaluation_id, input_digest, receipt):
     except (ValueError,KeyError,InvalidSignature,TypeError) as e:
         fail("Invalid receipt signature")
 @app.post("/mailroom/actions")
-async def actions(request:Request):
+async def actions(request:Request, payload: dict = Body(...)):
     if request.headers.get("content-type","").split(";")[0].strip()!="application/json":fail("Content-Type must be application/json",415)
     raw=await request.body()
     if len(raw)>900000:fail("Body too large",413)
