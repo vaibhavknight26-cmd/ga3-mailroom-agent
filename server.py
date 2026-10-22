@@ -152,8 +152,21 @@ def build_proposals(ds):
                 raise
         t=time.perf_counter()
         with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
-            for batch in executor.map(timed_generate,enumerate(chunks)):
-                generated.extend(batch)
+            futures=[executor.submit(timed_generate,item) for item in enumerate(chunks)]
+            for index,future in enumerate(futures):
+                try:
+                    generated.extend(future.result())
+                except (TimeoutError, OSError) as exc:
+                    # Retry only a failed batch, split into smaller concurrent
+                    # requests. Never invent decisions or blanket-approve mail.
+                    log.warning("Mailroom transient model failure batch=%d type=%s; retrying smaller chunks",
+                                index,type(exc).__name__)
+                    chunk=chunks[index]
+                    subchunks=[chunk[i:i+4] for i in range(0,len(chunk),4)]
+                    with ThreadPoolExecutor(max_workers=len(subchunks)) as retry_pool:
+                        retry_futures=[retry_pool.submit(gemini_generate,sub) for sub in subchunks]
+                        for retry_future in retry_futures:
+                            generated.extend(retry_future.result())
         log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
         t=time.perf_counter()
         by_id={p.get("dossierId"):p for p in generated if isinstance(p,dict)}
