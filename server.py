@@ -122,102 +122,72 @@ def fallback(d):
     return {"dossierId":d["dossierId"],"action":"request_confirmation","target":{"kind":"approval_queue","id":"mailroom"},"payload":{"claimedSender":"unknown","questionCode":"VERIFY_REQUEST","referenceId":d["dossierId"]},"evidence":[ids[0]]}
 def build_proposals(ds):
     started=time.perf_counter()
-    cached={}; missing=[]
-    # Fetch matching cached proposals in one database round trip instead of
-    # issuing one remote query per dossier (64 sequential network round trips).
     fingerprints={d["dossierId"]:digest(d) for d in ds}
     with dbconn() as db:
         rows=db.execute(
             "SELECT dossier_id, fingerprint, proposal FROM mailroom_cache WHERE dossier_id = ANY(%s)",
-            (list(fingerprints),)
-        ).fetchall()
-    matches={(row["dossier_id"],row["fingerprint"]):json.loads(row["proposal"]) for row in rows
-             if row["dossier_id"] in fingerprints and row["fingerprint"]==fingerprints[row["dossier_id"]]}
-    for d in ds:
-        proposal=matches.get((d["dossierId"],fingerprints[d["dossierId"]]))
-        if proposal is not None: cached[d["dossierId"]]=proposal
-        else: missing.append(d)
-    log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",time.perf_counter()-started,len(cached),len(missing))
-    if missing:
-        generated=[]
-        chunks=[missing[i:i+8] for i in range(0,len(missing),8)]
-        def timed_generate(item):
-            index,chunk=item
-            t=time.perf_counter()
-            try:
-                result=gemini_generate(chunk)
-                log.info("Mailroom timing gemini_batch=%d dossiers=%d duration=%.2fs",index,len(chunk),time.perf_counter()-t)
-                return result
-            except Exception:
-                log.exception("Mailroom timing gemini_batch=%d failed_after=%.2fs",index,time.perf_counter()-t)
+            (list(fingerprints),)).fetchall()
+    cached={(row["dossier_id"],row["fingerprint"]):json.loads(row["proposal"]) for row in rows}
+    missing=[d for d in ds if (d["dossierId"],fingerprints[d["dossierId"]]) not in cached]
+    log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",
+             time.perf_counter()-started,len(ds)-len(missing),len(missing))
+
+    def normalize_and_validate(p,d):
+        ensure(isinstance(p,dict),"Invalid model proposal")
+        p={k:p.get(k) for k in ("dossierId","action","target","payload","evidence")}
+        if p["action"]=="no_action" and isinstance(p["payload"],dict) and p["payload"].get("referenceId") is None:
+            p["payload"]["referenceId"]=d["dossierId"]
+        if p["action"] in SCHEMAS and isinstance(p["payload"],dict):
+            required=SCHEMAS[p["action"]][1]
+            if required.issubset(p["payload"]):
+                p["payload"]={k:p["payload"][k] for k in required}
+        p["callId"]="call-"+digest(d)[:40]
+        validate_proposal(p,d)
+        return p
+
+    def process_chunk(chunk, deadline):
+        # Generate, validate, and persist each successful chunk independently.
+        # Retry only failed chunks; never replace a failed decision with an
+        # invented authorization or an unconditional outbound action.
+        remaining=deadline-time.perf_counter()
+        if remaining<=3:
+            raise TimeoutError("Mailroom AI processing deadline reached")
+        timeout=max(2,min(19,remaining-3))
+        try:
+            raw=gemini_generate(chunk,timeout)
+            by_id={p.get("dossierId"):p for p in raw if isinstance(p,dict)}
+            ensure(len(by_id)==len(chunk),"Model proposal count mismatch")
+            validated=[normalize_and_validate(by_id.get(d["dossierId"]),d) for d in chunk]
+        except (TimeoutError,OSError,HTTPError,URLError,HTTPException,ValueError,KeyError,TypeError) as exc:
+            if len(chunk)==1 or deadline-time.perf_counter()<=5:
                 raise
-        t=time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(8,len(chunks))) as executor:
-            futures=[executor.submit(timed_generate,item) for item in enumerate(chunks)]
-            for index,future in enumerate(futures):
-                try:
-                    generated.extend(future.result())
-                except (TimeoutError, OSError, HTTPError, URLError) as exc:
-                    # Retry only a failed batch, split into smaller concurrent
-                    # requests. Never invent decisions or blanket-approve mail.
-                    log.warning("Mailroom transient model failure batch=%d type=%s; retrying smaller chunks",
-                                index,type(exc).__name__)
-                    chunk=chunks[index]
-                    subchunks=[chunk[i:i+2] for i in range(0,len(chunk),2)]
-                    with ThreadPoolExecutor(max_workers=len(subchunks)) as retry_pool:
-                        retry_futures=[retry_pool.submit(gemini_generate,sub,15) for sub in subchunks]
-                        for sub, retry_future in zip(subchunks, retry_futures):
-                            try:
-                                generated.extend(retry_future.result())
-                            except (TimeoutError, OSError, HTTPError, URLError) as retry_exc:
-                                # Retry a failed subchunk once more, individually.
-                                # A single failed retry must not immediately crash
-                                # the entire request while time remains.
-                                log.warning("Mailroom subchunk retry failed type=%s dossiers=%d; retrying individually",
-                                            type(retry_exc).__name__,len(sub))
-                                with ThreadPoolExecutor(max_workers=len(sub)) as last_pool:
-                                    last_futures=[last_pool.submit(gemini_generate,[d],8) for d in sub]
-                                    for last_future in last_futures:
-                                        generated.extend(last_future.result())
-        log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
-        t=time.perf_counter()
-        by_id={p.get("dossierId"):p for p in generated if isinstance(p,dict)}
-        ensure(len(by_id)==len(missing),"Model proposal count mismatch")
-        for d in missing:
-            p=by_id.get(d["dossierId"])
-            ensure(isinstance(p,dict),"Missing model proposal")
-            p={k:p.get(k) for k in ("dossierId","action","target","payload","evidence")}
-            if p["action"]=="no_action" and isinstance(p["payload"],dict) and p["payload"].get("referenceId") is None:
-                p["payload"]["referenceId"]=d["dossierId"]
-            # Model output may include redundant descriptive keys. The wire
-            # contract permits ONLY the frozen payload fields. Never synthesize
-            # missing required values or change an existing required value.
-            if p["action"] in SCHEMAS and isinstance(p["payload"],dict):
-                required=SCHEMAS[p["action"]][1]
-                if required.issubset(p["payload"]):
-                    extras=set(p["payload"])-required
-                    if extras:
-                        log.info("Mailroom stripped extraneous model payload keys: action=%s keys=%s",
-                                 p["action"],sorted(extras))
-                        p["payload"]={k:p["payload"][k] for k in required}
-            p["callId"]="call-"+digest(d)[:40]
-            try:
-                validate_proposal(p,d)
-            except HTTPException as exc:
-                # Never log source text, canaries, recipient data or model output.
-                log.error("Mailroom proposal rejected: dossier=%s action=%s error=%s",
-                          d["dossierId"],p.get("action"),exc.detail)
-                raise
-            cached[d["dossierId"]]=p
-        log.info("Mailroom timing validation=%.2fs",time.perf_counter()-t)
-        t=time.perf_counter()
+            log.warning("Mailroom splitting failed chunk dossiers=%d error_type=%s",
+                        len(chunk),type(exc).__name__)
+            middle=len(chunk)//2
+            return process_chunk(chunk[:middle],deadline)+process_chunk(chunk[middle:],deadline)
         with dbconn() as db:
-            for d in missing:
-                db.execute("""INSERT INTO mailroom_cache (dossier_id,fingerprint,proposal) VALUES (%s,%s,%s)
-                ON CONFLICT DO NOTHING""",(d["dossierId"],digest(d),json.dumps(cached[d["dossierId"]])))
-        log.info("Mailroom timing cache_save=%.2fs",time.perf_counter()-t)
-    log.info("Mailroom timing total_build=%.2fs dossiers=%d",time.perf_counter()-started,len(ds))
-    return [cached[d["dossierId"]] for d in ds]
+            for d,p in zip(chunk,validated):
+                db.execute("""INSERT INTO mailroom_cache (dossier_id,fingerprint,proposal)
+                    VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    (d["dossierId"],fingerprints[d["dossierId"]],json.dumps(p)))
+        log.info("Mailroom saved chunk dossiers=%d elapsed=%.2fs",
+                 len(chunk),time.perf_counter()-started)
+        return validated
+
+    if missing:
+        # Shared request budget; successful chunks survive even when another
+        # Gemini call fails, so retries/replays reuse validated work.
+        deadline=started+49
+        chunks=[missing[i:i+6] for i in range(0,len(missing),6)]
+        with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
+            futures=[executor.submit(process_chunk,chunk,deadline) for chunk in chunks]
+            for future in futures:
+                for p in future.result():
+                    d_id=p["dossierId"]
+                    cached[(d_id,fingerprints[d_id])]=p
+    log.info("Mailroom timing total_build=%.2fs dossiers=%d",
+             time.perf_counter()-started,len(ds))
+    return [cached[(d["dossierId"],fingerprints[d["dossierId"]])] for d in ds]
 def verify_signature(key_jwk, evaluation_id, input_digest, receipt):
     try:
         x=key_jwk["x"]
