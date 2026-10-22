@@ -164,6 +164,17 @@ def build_proposals(ds):
             p={k:p.get(k) for k in ("dossierId","action","target","payload","evidence")}
             if p["action"]=="no_action" and isinstance(p["payload"],dict) and p["payload"].get("referenceId") is None:
                 p["payload"]["referenceId"]=d["dossierId"]
+            # Model output may include redundant descriptive keys. The wire
+            # contract permits ONLY the frozen payload fields. Never synthesize
+            # missing required values or change an existing required value.
+            if p["action"] in SCHEMAS and isinstance(p["payload"],dict):
+                required=SCHEMAS[p["action"]][1]
+                if required.issubset(p["payload"]):
+                    extras=set(p["payload"])-required
+                    if extras:
+                        log.info("Mailroom stripped extraneous model payload keys: action=%s keys=%s",
+                                 p["action"],sorted(extras))
+                        p["payload"]={k:p["payload"][k] for k in required}
             p["callId"]="call-"+digest(d)[:40]
             try:
                 validate_proposal(p,d)
