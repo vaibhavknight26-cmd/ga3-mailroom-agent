@@ -2,6 +2,7 @@ import os, json, hashlib, base64, re, logging, secrets, time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
+from urllib.error import HTTPError, URLError
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import JSONResponse
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -156,7 +157,7 @@ def build_proposals(ds):
             for index,future in enumerate(futures):
                 try:
                     generated.extend(future.result())
-                except (TimeoutError, OSError) as exc:
+                except (TimeoutError, OSError, HTTPError, URLError) as exc:
                     # Retry only a failed batch, split into smaller concurrent
                     # requests. Never invent decisions or blanket-approve mail.
                     log.warning("Mailroom transient model failure batch=%d type=%s; retrying smaller chunks",
