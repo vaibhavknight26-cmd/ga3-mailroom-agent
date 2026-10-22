@@ -1,4 +1,4 @@
-import os, json, hashlib, base64, re, logging, secrets
+import os, json, hashlib, base64, re, logging, secrets, time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
@@ -120,6 +120,7 @@ def fallback(d):
     ids=[line["lineId"] for src in d["sources"] for line in src["lines"]]
     return {"dossierId":d["dossierId"],"action":"request_confirmation","target":{"kind":"approval_queue","id":"mailroom"},"payload":{"claimedSender":"unknown","questionCode":"VERIFY_REQUEST","referenceId":d["dossierId"]},"evidence":[ids[0]]}
 def build_proposals(ds):
+    started=time.perf_counter()
     cached={}; missing=[]
     with dbconn() as db:
         for d in ds:
@@ -127,15 +128,26 @@ def build_proposals(ds):
             row=db.execute("SELECT proposal FROM mailroom_cache WHERE dossier_id=%s AND fingerprint=%s",(d["dossierId"],fp)).fetchone()
             if row: cached[d["dossierId"]]=json.loads(row["proposal"])
             else: missing.append(d)
+    log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",time.perf_counter()-started,len(cached),len(missing))
     if missing:
         generated=[]
-        # Chunk to bound response sizes and stay within provider output limits.
         chunks=[missing[i:i+12] for i in range(0,len(missing),12)]
-        # Run independent Gemini batches concurrently to meet the 55-second deadline.
-        # executor.map preserves batch order and propagates errors without partial writes.
+        def timed_generate(item):
+            index,chunk=item
+            t=time.perf_counter()
+            try:
+                result=gemini_generate(chunk)
+                log.info("Mailroom timing gemini_batch=%d dossiers=%d duration=%.2fs",index,len(chunk),time.perf_counter()-t)
+                return result
+            except Exception:
+                log.exception("Mailroom timing gemini_batch=%d failed_after=%.2fs",index,time.perf_counter()-t)
+                raise
+        t=time.perf_counter()
         with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
-            for batch in executor.map(gemini_generate,chunks):
+            for batch in executor.map(timed_generate,enumerate(chunks)):
                 generated.extend(batch)
+        log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
+        t=time.perf_counter()
         by_id={p.get("dossierId"):p for p in generated if isinstance(p,dict)}
         ensure(len(by_id)==len(missing),"Model proposal count mismatch")
         for d in missing:
@@ -147,10 +159,14 @@ def build_proposals(ds):
             p["callId"]="call-"+digest(d)[:40]
             validate_proposal(p,d)
             cached[d["dossierId"]]=p
+        log.info("Mailroom timing validation=%.2fs",time.perf_counter()-t)
+        t=time.perf_counter()
         with dbconn() as db:
             for d in missing:
                 db.execute("""INSERT INTO mailroom_cache (dossier_id,fingerprint,proposal) VALUES (%s,%s,%s)
                 ON CONFLICT DO NOTHING""",(d["dossierId"],digest(d),json.dumps(cached[d["dossierId"]])))
+        log.info("Mailroom timing cache_save=%.2fs",time.perf_counter()-t)
+    log.info("Mailroom timing total_build=%.2fs dossiers=%d",time.perf_counter()-started,len(ds))
     return [cached[d["dossierId"]] for d in ds]
 def verify_signature(key_jwk, evaluation_id, input_digest, receipt):
     try:
