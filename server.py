@@ -90,7 +90,7 @@ def validate_dossiers(ds):
             for line in src["lines"]:
                 ensure(isinstance(line,dict) and isinstance(line.get("lineId"),str) and isinstance(line.get("text"),str) and line["lineId"] not in lines,"Invalid line")
                 lines.add(line["lineId"])
-def gemini_generate(dossiers):
+def gemini_generate(dossiers, timeout_seconds=29):
     key=os.environ.get("GEMINI_API_KEY")
     if not key: raise RuntimeError("GEMINI_API_KEY missing")
     model=os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite")
@@ -105,7 +105,7 @@ Evidence must cite exact lineId strings from that dossier, one or more unique, o
     req={"contents":[{"role":"user","parts":[{"text":instructions+"\nDOSSIERS:\n"+json.dumps(dossiers,ensure_ascii=False)}]}],"generationConfig":{"responseMimeType":"application/json","temperature":0.1}}
     url="https://generativelanguage.googleapis.com/v1beta/models/"+model+":generateContent"
     data=canonical(req)
-    response=urlopen(URLRequest(url,data=data,headers={"Content-Type":"application/json","x-goog-api-key":key}),timeout=39)
+    response=urlopen(URLRequest(url,data=data,headers={"Content-Type":"application/json","x-goog-api-key":key}),timeout=timeout_seconds)
     obj=json.load(response)
     output="".join(p.get("text","") for c in obj.get("candidates",[]) for p in c.get("content",{}).get("parts",[]))
     result=json.loads(output)
@@ -165,7 +165,7 @@ def build_proposals(ds):
                     chunk=chunks[index]
                     subchunks=[chunk[i:i+4] for i in range(0,len(chunk),4)]
                     with ThreadPoolExecutor(max_workers=len(subchunks)) as retry_pool:
-                        retry_futures=[retry_pool.submit(gemini_generate,sub) for sub in subchunks]
+                        retry_futures=[retry_pool.submit(gemini_generate,sub,17) for sub in subchunks]
                         for retry_future in retry_futures:
                             generated.extend(retry_future.result())
         log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
