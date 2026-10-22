@@ -165,7 +165,13 @@ def build_proposals(ds):
             if p["action"]=="no_action" and isinstance(p["payload"],dict) and p["payload"].get("referenceId") is None:
                 p["payload"]["referenceId"]=d["dossierId"]
             p["callId"]="call-"+digest(d)[:40]
-            validate_proposal(p,d)
+            try:
+                validate_proposal(p,d)
+            except HTTPException as exc:
+                # Never log source text, canaries, recipient data or model output.
+                log.error("Mailroom proposal rejected: dossier=%s action=%s error=%s",
+                          d["dossierId"],p.get("action"),exc.detail)
+                raise
             cached[d["dossierId"]]=p
         log.info("Mailroom timing validation=%.2fs",time.perf_counter()-t)
         t=time.perf_counter()
@@ -195,7 +201,11 @@ async def actions(request:Request, payload: dict = Body(...)):
     if len(raw)>900000:fail("Body too large",413)
     try: body=json.loads(raw)
     except ValueError:fail("Invalid JSON")
-    validate_request(body)
+    try:
+        validate_request(body)
+    except HTTPException as exc:
+        log.warning("Mailroom request rejected: error=%s",exc.detail)
+        raise
     eid=body["evaluationId"]
     if body["operation"]=="propose":
         ensure(isinstance(body.get("receiptVerifier"),dict) and body["receiptVerifier"].get("algorithm")=="Ed25519","Invalid verifier")
