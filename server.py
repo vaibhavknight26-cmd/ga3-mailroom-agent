@@ -1,5 +1,5 @@
 import os, json, hashlib, base64, re, logging, secrets, time, threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -185,12 +185,35 @@ def build_proposals(ds):
         # Gemini call fails, so retries/replays reuse validated work.
         deadline=started+49
         chunks=[missing[i:i+8] for i in range(0,len(missing),8)]
-        with ThreadPoolExecutor(max_workers=min(4,len(chunks))) as executor:
-            futures=[executor.submit(process_chunk,chunk,deadline) for chunk in chunks]
-            for future in futures:
-                for p in future.result():
-                    d_id=p["dossierId"]
-                    cached[(d_id,fingerprints[d_id])]=p
+        executor=ThreadPoolExecutor(max_workers=min(4,len(chunks)))
+        futures=[executor.submit(process_chunk,chunk,deadline) for chunk in chunks]
+        pending=set(futures)
+        first_error=None
+        try:
+            while pending:
+                remaining=deadline-time.perf_counter()
+                if remaining<=0:
+                    log.warning("Mailroom processing deadline exceeded pending_chunks=%d",len(pending))
+                    break
+                completed,pending=wait(pending,timeout=remaining,return_when=FIRST_COMPLETED)
+                for future in completed:
+                    try:
+                        for p in future.result():
+                            d_id=p["dossierId"]
+                            cached[(d_id,fingerprints[d_id])]=p
+                    except Exception as exc:
+                        if first_error is None: first_error=exc
+                        log.warning("Mailroom chunk incomplete error_type=%s",type(exc).__name__)
+            if pending or first_error:
+                # Never send incomplete or fabricated proposals. A retry with
+                # identical dossiers can reuse the independently saved chunks.
+                log.warning("Mailroom incomplete cached=%d total=%d pending=%d",
+                            len(cached),len(ds),len(pending))
+                fail("AI processing incomplete; retry identical request to reuse cached decisions",503)
+        finally:
+            # A context manager would wait for all worker threads, even after
+            # the request deadline. Workers may finish saving valid chunks.
+            executor.shutdown(wait=False,cancel_futures=True)
     log.info("Mailroom timing total_build=%.2fs dossiers=%d",
              time.perf_counter()-started,len(ds))
     return [cached[(d["dossierId"],fingerprints[d["dossierId"]])] for d in ds]
