@@ -108,7 +108,14 @@ Evidence must cite exact lineId strings from that dossier, one or more unique, o
     obj=json.load(response)
     output="".join(p.get("text","") for c in obj.get("candidates",[]) for p in c.get("content",{}).get("parts",[]))
     result=json.loads(output)
-    return result["proposals"]
+    if isinstance(result,list):
+        proposals=result
+    elif isinstance(result,dict) and isinstance(result.get("proposals"),list):
+        proposals=result["proposals"]
+    else:
+        log.warning("Mailroom model returned unexpected JSON shape: %s", type(result).__name__)
+        fail("Invalid model response",502)
+    return proposals
 def fallback(d):
     ids=[line["lineId"] for src in d["sources"] for line in src["lines"]]
     return {"dossierId":d["dossierId"],"action":"request_confirmation","target":{"kind":"approval_queue","id":"mailroom"},"payload":{"claimedSender":"unknown","questionCode":"VERIFY_REQUEST","referenceId":d["dossierId"]},"evidence":[ids[0]]}
