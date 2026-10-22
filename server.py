@@ -1,4 +1,4 @@
-import os, json, hashlib, base64, re, logging, secrets, time
+import os, json, hashlib, base64, re, logging, secrets, time, threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
@@ -145,7 +145,9 @@ def build_proposals(ds):
         validate_proposal(p,d)
         return p
 
-    def process_chunk(chunk, deadline):
+    quota_lock=threading.Lock()
+    quota_calls=[0]
+    def process_chunk(chunk, deadline, retry_depth=0):
         # Generate, validate, and persist each successful chunk independently.
         # Retry only failed chunks; never replace a failed decision with an
         # invented authorization or an unconditional outbound action.
@@ -153,18 +155,22 @@ def build_proposals(ds):
         if remaining<=3:
             raise TimeoutError("Mailroom AI processing deadline reached")
         timeout=max(2,min(19,remaining-3))
+        with quota_lock:
+            if quota_calls[0]>=14:
+                raise RuntimeError("Mailroom Gemini request budget exhausted; cached work retained")
+            quota_calls[0]+=1
         try:
             raw=gemini_generate(chunk,timeout)
             by_id={p.get("dossierId"):p for p in raw if isinstance(p,dict)}
             ensure(len(by_id)==len(chunk),"Model proposal count mismatch")
             validated=[normalize_and_validate(by_id.get(d["dossierId"]),d) for d in chunk]
         except (TimeoutError,OSError,HTTPError,URLError,HTTPException,ValueError,KeyError,TypeError) as exc:
-            if len(chunk)==1 or deadline-time.perf_counter()<=5:
+            if len(chunk)==1 or retry_depth>=1 or deadline-time.perf_counter()<=5:
                 raise
             log.warning("Mailroom splitting failed chunk dossiers=%d error_type=%s",
                         len(chunk),type(exc).__name__)
             middle=len(chunk)//2
-            return process_chunk(chunk[:middle],deadline)+process_chunk(chunk[middle:],deadline)
+            return process_chunk(chunk[:middle],deadline,retry_depth+1)+process_chunk(chunk[middle:],deadline,retry_depth+1)
         with dbconn() as db:
             for d,p in zip(chunk,validated):
                 db.execute("""INSERT INTO mailroom_cache (dossier_id,fingerprint,proposal)
@@ -178,8 +184,8 @@ def build_proposals(ds):
         # Shared request budget; successful chunks survive even when another
         # Gemini call fails, so retries/replays reuse validated work.
         deadline=started+49
-        chunks=[missing[i:i+6] for i in range(0,len(missing),6)]
-        with ThreadPoolExecutor(max_workers=min(6,len(chunks))) as executor:
+        chunks=[missing[i:i+8] for i in range(0,len(missing),8)]
+        with ThreadPoolExecutor(max_workers=min(4,len(chunks))) as executor:
             futures=[executor.submit(process_chunk,chunk,deadline) for chunk in chunks]
             for future in futures:
                 for p in future.result():
