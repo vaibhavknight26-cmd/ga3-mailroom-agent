@@ -55,7 +55,9 @@ def validate_proposal(p,dossier):
     ensure(isinstance(p["callId"],str) and re.fullmatch(r"[A-Za-z0-9._:-]{12,128}",p["callId"]), "Invalid callId")
     kind, fields=SCHEMAS[p["action"]]
     t=p["target"]; v=p["payload"]
-    ensure(isinstance(v,dict) and set(v)==fields and all(isinstance(x,str) and x for x in v.values()), "Invalid payload")
+    if not (isinstance(v,dict) and set(v)==fields and all(isinstance(x,str) and x for x in v.values())):
+        log.warning("Mailroom invalid proposal payload: action=%s dossierId=%s expected_fields=%s actual_fields=%s value_types=%s", p["action"], p["dossierId"], sorted(fields), sorted(v.keys()) if isinstance(v,dict) else None, {k:type(val).__name__ for k,val in v.items()} if isinstance(v,dict) else type(v).__name__)
+        fail("Invalid payload")
     if kind is None: ensure(t is None,"Invalid null target")
     else: ensure(isinstance(t,dict) and set(t)=={"kind","id"} and t["kind"]==kind and isinstance(t["id"],str) and bool(t["id"]),"Invalid target")
     fixed={"create_draft":("template","order_status"),"send_approved_notice":("template","approved_delivery_notice"),
