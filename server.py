@@ -166,8 +166,19 @@ def build_proposals(ds):
                     subchunks=[chunk[i:i+2] for i in range(0,len(chunk),2)]
                     with ThreadPoolExecutor(max_workers=len(subchunks)) as retry_pool:
                         retry_futures=[retry_pool.submit(gemini_generate,sub,15) for sub in subchunks]
-                        for retry_future in retry_futures:
-                            generated.extend(retry_future.result())
+                        for sub, retry_future in zip(subchunks, retry_futures):
+                            try:
+                                generated.extend(retry_future.result())
+                            except (TimeoutError, OSError, HTTPError, URLError) as retry_exc:
+                                # Retry a failed subchunk once more, individually.
+                                # A single failed retry must not immediately crash
+                                # the entire request while time remains.
+                                log.warning("Mailroom subchunk retry failed type=%s dossiers=%d; retrying individually",
+                                            type(retry_exc).__name__,len(sub))
+                                with ThreadPoolExecutor(max_workers=len(sub)) as last_pool:
+                                    last_futures=[last_pool.submit(gemini_generate,[d],8) for d in sub]
+                                    for last_future in last_futures:
+                                        generated.extend(last_future.result())
         log.info("Mailroom timing all_gemini=%.2fs batches=%d",time.perf_counter()-t,len(chunks))
         t=time.perf_counter()
         by_id={p.get("dossierId"):p for p in generated if isinstance(p,dict)}
