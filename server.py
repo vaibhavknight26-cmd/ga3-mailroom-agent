@@ -154,7 +154,7 @@ def build_proposals(ds):
         remaining=deadline-time.perf_counter()
         if remaining<=3:
             raise TimeoutError("Mailroom AI processing deadline reached")
-        timeout=max(2,min(19,remaining-3))
+        timeout=max(2,min(37,remaining-3))
         with quota_lock:
             if quota_calls[0]>=14:
                 raise RuntimeError("Mailroom Gemini request budget exhausted; cached work retained")
@@ -165,7 +165,7 @@ def build_proposals(ds):
             ensure(len(by_id)==len(chunk),"Model proposal count mismatch")
             validated=[normalize_and_validate(by_id.get(d["dossierId"]),d) for d in chunk]
         except (TimeoutError,OSError,HTTPError,URLError,HTTPException,ValueError,KeyError,TypeError) as exc:
-            if len(chunk)==1 or retry_depth>=1 or deadline-time.perf_counter()<=5:
+            if len(chunk)==1 or retry_depth>=0 or deadline-time.perf_counter()<=5:
                 raise
             log.warning("Mailroom splitting failed chunk dossiers=%d error_type=%s",
                         len(chunk),type(exc).__name__)
@@ -184,7 +184,7 @@ def build_proposals(ds):
         # Shared request budget; successful chunks survive even when another
         # Gemini call fails, so retries/replays reuse validated work.
         deadline=started+49
-        chunks=[missing[i:i+8] for i in range(0,len(missing),8)]
+        chunks=[missing[i:i+16] for i in range(0,len(missing),16)]
         executor=ThreadPoolExecutor(max_workers=min(4,len(chunks)))
         futures=[executor.submit(process_chunk,chunk,deadline) for chunk in chunks]
         pending=set(futures)
@@ -203,7 +203,7 @@ def build_proposals(ds):
                             cached[(d_id,fingerprints[d_id])]=p
                     except Exception as exc:
                         if first_error is None: first_error=exc
-                        log.warning("Mailroom chunk incomplete error_type=%s",type(exc).__name__)
+                        log.warning("Mailroom chunk incomplete error_type=%s http_status=%s",type(exc).__name__,getattr(exc,"code",None))
             if pending or first_error:
                 # Never send incomplete or fabricated proposals. A retry with
                 # identical dossiers can reuse the independently saved chunks.
