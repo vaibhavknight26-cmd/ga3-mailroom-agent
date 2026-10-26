@@ -162,10 +162,10 @@ def build_proposals(ds):
         try:
             raw=gemini_generate(chunk,timeout)
             by_id={p.get("dossierId"):p for p in raw if isinstance(p,dict)}
-            ensure(len(by_id)==len(chunk),"Model proposal count mismatch")
+            ensure(len(raw)==len(chunk) and len(by_id)==len(chunk),"Model proposal count mismatch")
             validated=[normalize_and_validate(by_id.get(d["dossierId"]),d) for d in chunk]
         except (TimeoutError,OSError,HTTPError,URLError,HTTPException,ValueError,KeyError,TypeError) as exc:
-            if len(chunk)==1 or retry_depth>=0 or deadline-time.perf_counter()<=5:
+            if len(chunk)==1 or retry_depth>=4 or deadline-time.perf_counter()<=5:
                 raise
             log.warning("Mailroom splitting failed chunk dossiers=%d error_type=%s",
                         len(chunk),type(exc).__name__)
