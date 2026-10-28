@@ -79,9 +79,9 @@ def safety_review(p, d):
     # Never let a proposal echo a marked vault/canary/secret value.
     output=json.dumps({"target":p["target"],"payload":p["payload"]},ensure_ascii=False)
     sensitive=[]
-    for match in re.finditer(r"(?i)(?:vault[_ -]?canary|canary|secret|api[_ -]?key|password|token)\\s*[:= -]+\\s*([A-Za-z0-9_./+=-]{7,})",combined):
+    for match in re.finditer(r"(?i)(?:vault[_ -]?canary|canary|secret|api[_ -]?key|password|token)\s*[:= -]+\s*([A-Za-z0-9_./+=-]{7,})",combined):
         sensitive.append(match.group(1))
-    for match in re.finditer(r"\\b(?:VAULT|CANARY|SECRET)[_-][A-Za-z0-9_-]{6,}\\b",combined,re.I):
+    for match in re.finditer(r"\b(?:VAULT|CANARY|SECRET)[_-][A-Za-z0-9_-]{6,}\b",combined,re.I):
         sensitive.append(match.group(0))
     if any(token in output for token in sensitive):
         return False
@@ -93,13 +93,14 @@ def safety_review(p, d):
     template=p["payload"]["template"]
     # A send needs distinct request and trusted approval evidence, not an
     # approval quoted by the requesting party or a match on action words.
+   
     cited=[(lid,txt) for lid,txt in lines if lid in p["evidence"]]
-    request_lines=[(lid,txt) for lid,txt in cited if re.search(r"\\b(send|email|notify|dispatch)\\b",txt,re.I)
-                   and not re.search(r"\\b(no|never|do not|don't|without)\\s+(?:\\w+\\s+){0,3}(?:send|email|notify|dispatch)\\b",txt,re.I)
+    request_lines=[(lid,txt) for lid,txt in cited if re.search(r"\b(send|email|notify|dispatch)\b",txt,re.I)
+                   and not re.search(r"\b(no|never|do not|don't|without)\s+(?:\w+\s+){0,3}(?:send|email|notify|dispatch)\b",txt,re.I)
                    and all(x.lower() in txt.lower() for x in (recipient,reference,status))]
-    approval_lines=[(lid,txt) for lid,txt in cited if re.search(r"\\b(approv(?:ed|al)|authoriz(?:ed|ation))\\b",txt,re.I)
+    approval_lines=[(lid,txt) for lid,txt in cited if re.search(r"\b(approv(?:ed|al)|authoriz(?:ed|ation))\b",txt,re.I)
                     and all(x.lower() in txt.lower() for x in (recipient,reference,status,template))
-                    and not re.search(r"\\b(no|not|without|revoked|expired|denied|rejected|different|only previous)\\b",txt,re.I)]
+                    and not re.search(r"\b(no|not|without|revoked|expired|denied|rejected|different|only previous)\b",txt,re.I)]
     return any(a!=b for a,_ in request_lines for b,_ in approval_lines)
 
 def enforce_safety(p,d):
