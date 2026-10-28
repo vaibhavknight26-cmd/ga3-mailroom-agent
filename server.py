@@ -1,4 +1,4 @@
-import os, json, hashlib, base64, re, logging, secrets, time, threading
+import os, json, hashlib, base64, binascii, re, logging, secrets, time, threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 from urllib.request import Request as URLRequest, urlopen
@@ -127,7 +127,16 @@ def build_proposals(ds):
         rows=db.execute(
             "SELECT dossier_id, fingerprint, proposal FROM mailroom_cache WHERE dossier_id = ANY(%s)",
             (list(fingerprints),)).fetchall()
-    cached={(row["dossier_id"],row["fingerprint"]):json.loads(row["proposal"]) for row in rows}
+    cached={}
+    dossier_by_id={d["dossierId"]:d for d in ds}
+    for row in rows:
+        key=(row["dossier_id"],row["fingerprint"])
+        try:
+            proposal=json.loads(row["proposal"])
+            validate_proposal(proposal,dossier_by_id[row["dossier_id"]])
+            cached[key]=proposal
+        except (ValueError,KeyError,TypeError,HTTPException):
+            log.warning("Mailroom cached proposal failed validation: dossierId=%s",row["dossier_id"])
     missing=[d for d in ds if (d["dossierId"],fingerprints[d["dossierId"]]) not in cached]
     log.info("Mailroom timing cache_lookup=%.2fs hits=%d misses=%d",
              time.perf_counter()-started,len(ds)-len(missing),len(missing))
@@ -234,7 +243,7 @@ def verify_signature(key_jwk, evaluation_id, input_digest, receipt):
         signed={"profile":PROFILE,"evaluationId":evaluation_id,"inputDigest":input_digest,
           "receipt":{k:v for k,v in receipt.items() if k!="receiptSignature"}}
         key.verify(sig,canonical(signed))
-    except (ValueError,KeyError,InvalidSignature,TypeError) as e:
+    except (ValueError,KeyError,InvalidSignature,TypeError,binascii.Error) as e:
         fail("Invalid receipt signature")
 @app.post("/mailroom/actions")
 async def actions(request:Request, payload: dict = Body(...)):
