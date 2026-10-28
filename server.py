@@ -72,6 +72,46 @@ def validate_proposal(p,dossier):
     ids=[line["lineId"] for src in dossier["sources"] for line in src["lines"]]
     ev=p["evidence"]
     ensure(isinstance(ev,list) and bool(ev) and len(ev)==len(set(ev)) and all(isinstance(e,str) and e in ids for e in ev),"Invalid evidence")
+def safety_review(p, d):
+    """Fail closed on outbound authority and accidental confidential-token copying."""
+    lines=[(line["lineId"],line["text"]) for src in d["sources"] for line in src["lines"]]
+    combined=" ".join(t for _,t in lines)
+    # Never let a proposal echo a marked vault/canary/secret value.
+    output=json.dumps({"target":p["target"],"payload":p["payload"]},ensure_ascii=False)
+    sensitive=[]
+    for match in re.finditer(r"(?i)(?:vault[_ -]?canary|canary|secret|api[_ -]?key|password|token)\\s*[:= -]+\\s*([A-Za-z0-9_./+=-]{7,})",combined):
+        sensitive.append(match.group(1))
+    for match in re.finditer(r"\\b(?:VAULT|CANARY|SECRET)[_-][A-Za-z0-9_-]{6,}\\b",combined,re.I):
+        sensitive.append(match.group(0))
+    if any(token in output for token in sensitive):
+        return False
+    if p["action"]!="send_approved_notice":
+        return True
+    recipient=p["target"]["id"]
+    reference=p["payload"]["referenceId"]
+    status=p["payload"]["status"]
+    template=p["payload"]["template"]
+    # A send needs distinct request and trusted approval evidence, not an
+    # approval quoted by the requesting party or a match on action words.
+    cited=[(lid,txt) for lid,txt in lines if lid in p["evidence"]]
+    request_lines=[(lid,txt) for lid,txt in cited if re.search(r"\\b(send|email|notify|dispatch)\\b",txt,re.I)
+                   and not re.search(r"\\b(no|never|do not|don't|without)\\s+(?:\\w+\\s+){0,3}(?:send|email|notify|dispatch)\\b",txt,re.I)
+                   and all(x.lower() in txt.lower() for x in (recipient,reference,status))]
+    approval_lines=[(lid,txt) for lid,txt in cited if re.search(r"\\b(approv(?:ed|al)|authoriz(?:ed|ation))\\b",txt,re.I)
+                    and all(x.lower() in txt.lower() for x in (recipient,reference,status,template))
+                    and not re.search(r"\\b(no|not|without|revoked|expired|denied|rejected|different|only previous)\\b",txt,re.I)]
+    return any(a!=b for a,_ in request_lines for b,_ in approval_lines)
+
+def enforce_safety(p,d):
+    if safety_review(p,d):
+        return p
+    log.warning("Mailroom safety gate blocked proposal: dossierId=%s action=%s",d["dossierId"],p["action"])
+    # Human verification instead of a risky outbound or secret-bearing action.
+    replacement=fallback(d)
+    replacement["callId"]=p["callId"]
+    validate_proposal(replacement,d)
+    return replacement
+
 def validate_request(body):
     ensure(isinstance(body,dict) and body.get("profile")==PROFILE,"Invalid profile")
     ensure(body.get("operation") in {"propose","commit"},"Invalid operation")
@@ -134,7 +174,7 @@ def build_proposals(ds):
         try:
             proposal=json.loads(row["proposal"])
             validate_proposal(proposal,dossier_by_id[row["dossier_id"]])
-            cached[key]=proposal
+            cached[key]=enforce_safety(proposal,dossier_by_id[row["dossier_id"]])
         except (ValueError,KeyError,TypeError,HTTPException):
             log.warning("Mailroom cached proposal failed validation: dossierId=%s",row["dossier_id"])
     missing=[d for d in ds if (d["dossierId"],fingerprints[d["dossierId"]]) not in cached]
@@ -152,7 +192,7 @@ def build_proposals(ds):
                 p["payload"]={k:p["payload"][k] for k in required}
         p["callId"]="call-"+digest(d)[:40]
         validate_proposal(p,d)
-        return p
+        return enforce_safety(p,d)
 
     quota_lock=threading.Lock()
     quota_calls=[0]
