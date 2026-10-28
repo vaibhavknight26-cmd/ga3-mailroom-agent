@@ -159,8 +159,21 @@ Evidence must cite exact lineId strings from that dossier, one or more unique, o
         fail("Invalid model response",502)
     return proposals
 def fallback(d):
-    ids=[line["lineId"] for src in d["sources"] for line in src["lines"]]
-    return {"dossierId":d["dossierId"],"action":"request_confirmation","target":{"kind":"approval_queue","id":"mailroom"},"payload":{"claimedSender":"unknown","questionCode":"VERIFY_REQUEST","referenceId":d["dossierId"]},"evidence":[ids[0]]}
+    """Conservative fallback with case-specific references when unambiguous."""
+    lines=[(line["lineId"],line["text"]) for src in d["sources"] for line in src["lines"]]
+    ids=[lid for lid,_ in lines]
+    references=[]
+    for lid,txt in lines:
+        for match in re.finditer(r"\b(?:ORD|CASE|REF)[-_][A-Za-z0-9-]+\b",txt,re.I):
+            references.append((lid,match.group(0)))
+    distinct={ref.lower() for _,ref in references}
+    if len(distinct)==1:
+        reference=references[0][1]
+        evidence=[lid for lid,ref in references if ref.lower()==reference.lower()][:2]
+    else:
+        reference=d["dossierId"]
+        evidence=ids[:1]
+    return {"dossierId":d["dossierId"],"action":"request_confirmation","target":{"kind":"approval_queue","id":d["mailbox"] or "mailroom"},"payload":{"claimedSender":d["mailbox"] or "unknown","questionCode":"VERIFY_REQUEST","referenceId":reference},"evidence":evidence}
 def build_proposals(ds):
     started=time.perf_counter()
     fingerprints={d["dossierId"]:digest(d) for d in ds}
